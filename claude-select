@@ -1,0 +1,508 @@
+#!/usr/bin/env bash
+# claude-select — Multi-account launcher for Claude Code
+# Lets you run concurrent Claude Code sessions with different accounts,
+# while sharing settings, skills, agents, and CLAUDE.md across all accounts.
+#
+# Usage:
+#   claude-select              Launch interactive account picker
+#   claude-select <name>       Launch Claude with a specific account
+#   claude-select add <name>   Add a new account (launches claude login)
+#   claude-select remove <name> Remove an account
+#   claude-select list         List configured accounts
+#   claude-select default <name> Set the default account
+#   claude-select color <name> Change an account's status line color
+#   claude-select sync         Re-sync shared resources (symlinks)
+#
+# How it works:
+#   Each account gets its own CLAUDE_CONFIG_DIR (~/.claude-accounts/profiles/<name>/).
+#   Shared resources (settings.json, agents/, CLAUDE.md, etc.) are symlinked from
+#   your main ~/.claude/ directory into each profile, so you maintain one set of
+#   settings. Auth is handled by the macOS Keychain — each CLAUDE_CONFIG_DIR gets
+#   its own namespaced Keychain entry, so concurrent sessions just work.
+
+set -euo pipefail
+
+# --- Configuration ---
+ACCOUNTS_DIR="${HOME}/.claude-accounts"
+PROFILES_DIR="${ACCOUNTS_DIR}/profiles"
+CONFIG_FILE="${ACCOUNTS_DIR}/config.json"
+CLAUDE_HOME="${HOME}/.claude"
+
+# Shared resources to symlink from ~/.claude into each profile.
+# Edit this list to control what's shared vs per-account.
+SHARED_RESOURCES=(
+  "settings.json"
+  "settings.local.json"
+  "CLAUDE.md"
+  "agents"
+  "statsig"
+)
+
+# --- Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# Color palette for account indicators (parallel arrays: name -> R;G;B)
+COLOR_NAMES=(blue green red purple orange cyan pink yellow)
+COLOR_RGBS=("97;175;239" "152;195;121" "224;108;117" "198;120;221" "209;154;102" "86;182;194" "255;121;198" "229;192;123")
+
+# Look up RGB for a color name; prints empty string if not found
+color_rgb() {
+  local target="$1"
+  local i
+  for i in "${!COLOR_NAMES[@]}"; do
+    if [[ "${COLOR_NAMES[$i]}" == "$target" ]]; then
+      echo "${COLOR_RGBS[$i]}"
+      return
+    fi
+  done
+}
+
+# --- Helpers ---
+ensure_deps() {
+  if ! command -v jq &>/dev/null; then
+    echo -e "${RED}Error:${RESET} jq is required. Install with: brew install jq"
+    exit 1
+  fi
+  if ! command -v claude &>/dev/null; then
+    echo -e "${RED}Error:${RESET} claude (Claude Code) not found in PATH."
+    exit 1
+  fi
+}
+
+ensure_setup() {
+  mkdir -p "$PROFILES_DIR"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo '{"default":"","accounts":{}}' | jq . > "$CONFIG_FILE"
+  fi
+}
+
+get_accounts() {
+  jq -r '.accounts | keys[]' "$CONFIG_FILE" 2>/dev/null
+}
+
+get_default() {
+  jq -r '.default // ""' "$CONFIG_FILE"
+}
+
+get_account_label() {
+  local name="$1"
+  local default
+  default=$(get_default)
+  local suffix=""
+  [[ "$name" == "$default" ]] && suffix=" ${DIM}(default)${RESET}"
+
+  local color
+  color=$(get_account_color "$name")
+  local swatch=""
+  local rgb
+  rgb=$(color_rgb "$color")
+  if [[ -n "$rgb" ]]; then
+    local r g b
+    IFS=';' read -r r g b <<< "$rgb"
+    swatch="$(printf '\033[38;2;%d;%d;%dm██\033[0m ' "$r" "$g" "$b")"
+  fi
+
+  echo -e "${swatch}${name}${suffix}"
+}
+
+account_exists() {
+  local name="$1"
+  jq -e ".accounts[\"$name\"]" "$CONFIG_FILE" &>/dev/null
+}
+
+get_account_color() {
+  local name="$1"
+  jq -r ".accounts[\"$name\"].color // \"\"" "$CONFIG_FILE"
+}
+
+show_color_palette() {
+  echo -e "  ${BOLD}Pick a color:${RESET}\n"
+  local i=1
+  for idx in "${!COLOR_NAMES[@]}"; do
+    local color_name="${COLOR_NAMES[$idx]}"
+    local rgb="${COLOR_RGBS[$idx]}"
+    local r g b
+    IFS=';' read -r r g b <<< "$rgb"
+    local swatch
+    swatch="$(printf '\033[38;2;%d;%d;%dm██\033[0m' "$r" "$g" "$b")"
+    echo -e "  ${GREEN}${i})${RESET} ${swatch} ${color_name}"
+    ((i++))
+  done
+  echo ""
+}
+
+prompt_color() {
+  show_color_palette
+  local choice
+  read -rp "  Choose [1-${#COLOR_NAMES[@]}]: " choice
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#COLOR_NAMES[@]} )); then
+    echo -e "  ${YELLOW}Invalid choice, defaulting to blue.${RESET}"
+    echo "blue"
+    return
+  fi
+
+  echo "${COLOR_NAMES[$((choice - 1))]}"
+}
+
+# --- Symlink shared resources ---
+sync_shared() {
+  local profile_dir="$1"
+  mkdir -p "$profile_dir"
+
+  for resource in "${SHARED_RESOURCES[@]}"; do
+    local src="${CLAUDE_HOME}/${resource}"
+    local dst="${profile_dir}/${resource}"
+
+    # Remove existing symlink (don't touch real files/dirs)
+    if [[ -L "$dst" ]]; then
+      rm "$dst"
+    fi
+
+    # Only symlink if the source exists
+    if [[ -e "$src" ]]; then
+      ln -sf "$src" "$dst"
+    fi
+  done
+}
+
+# --- Commands ---
+
+cmd_add() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage:${RESET} claude-select add <account-name>"
+    exit 1
+  fi
+
+  if account_exists "$name"; then
+    echo -e "${YELLOW}Account '${name}' already exists.${RESET} Remove it first with: claude-select remove ${name}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}Adding account: ${CYAN}${name}${RESET}\n"
+
+  # Pick a color for this account
+  local color
+  color=$(prompt_color)
+  local rgb
+  rgb=$(color_rgb "$color")
+  local r g b
+  IFS=';' read -r r g b <<< "$rgb"
+  echo -e "\n  Using $(printf '\033[38;2;%d;%d;%dm%s\033[0m' "$r" "$g" "$b" "$color") for ${CYAN}${name}${RESET}\n"
+
+  # Create profile directory and sync shared resources
+  local profile_dir="${PROFILES_DIR}/${name}"
+  mkdir -p "$profile_dir"
+  sync_shared "$profile_dir"
+
+  # Register the account with its color
+  local tmp
+  tmp=$(jq --arg name "$name" --arg color "$color" '.accounts[$name] = {"color": $color}' "$CONFIG_FILE")
+  echo "$tmp" > "$CONFIG_FILE"
+
+  # Set as default if it's the first account
+  local count
+  count=$(jq '.accounts | length' "$CONFIG_FILE")
+  if [[ "$count" -eq 1 ]]; then
+    tmp=$(jq --arg name "$name" '.default = $name' "$CONFIG_FILE")
+    echo "$tmp" > "$CONFIG_FILE"
+    echo -e "  ${GREEN}Set as default account.${RESET}"
+  fi
+
+  echo -e "  Profile created at: ${DIM}${profile_dir}${RESET}"
+  echo -e "\n  Now logging in. A browser window will open — sign in with the"
+  echo -e "  account you want to use for ${CYAN}${name}${RESET}.\n"
+
+  # Launch claude login with the new profile's config dir
+  CLAUDE_CONFIG_DIR="$profile_dir" claude login
+
+  echo -e "\n  ${GREEN}Account '${name}' added and authenticated.${RESET}"
+}
+
+cmd_remove() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage:${RESET} claude-select remove <account-name>"
+    exit 1
+  fi
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Account '${name}' not found.${RESET}"
+    exit 1
+  fi
+
+  # Remove profile directory (symlinks + claude-generated files)
+  rm -rf "${PROFILES_DIR}/${name}"
+
+  # Update config
+  local tmp
+  tmp=$(jq --arg name "$name" 'del(.accounts[$name])' "$CONFIG_FILE")
+  echo "$tmp" > "$CONFIG_FILE"
+
+  # Clear default if it was this account
+  local default
+  default=$(get_default)
+  if [[ "$default" == "$name" ]]; then
+    tmp=$(jq '.default = ""' "$CONFIG_FILE")
+    echo "$tmp" > "$CONFIG_FILE"
+    echo -e "  ${YELLOW}Note:${RESET} This was the default account. Set a new default with: claude-select default <name>"
+  fi
+
+  echo -e "  ${GREEN}Account '${name}' removed.${RESET}"
+  echo -e "  ${DIM}(Keychain credentials may remain — remove manually in Keychain Access if needed)${RESET}"
+}
+
+cmd_default() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    local current
+    current=$(get_default)
+    if [[ -n "$current" ]]; then
+      echo -e "Current default: ${CYAN}${current}${RESET}"
+    else
+      echo -e "${YELLOW}No default account set.${RESET}"
+    fi
+    echo -e "${DIM}Usage: claude-select default <account-name>${RESET}"
+    return
+  fi
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Account '${name}' not found.${RESET}"
+    exit 1
+  fi
+
+  local tmp
+  tmp=$(jq --arg name "$name" '.default = $name' "$CONFIG_FILE")
+  echo "$tmp" > "$CONFIG_FILE"
+  echo -e "  ${GREEN}Default set to '${name}'.${RESET}"
+}
+
+cmd_list() {
+  local accounts
+  accounts=$(get_accounts)
+  if [[ -z "$accounts" ]]; then
+    echo -e "${YELLOW}No accounts configured.${RESET} Add one with: claude-select add <name>"
+    return
+  fi
+
+  echo -e "${BOLD}Configured accounts:${RESET}\n"
+  while IFS= read -r name; do
+    echo -e "  $(get_account_label "$name")"
+  done <<< "$accounts"
+  echo ""
+}
+
+cmd_sync() {
+  local accounts
+  accounts=$(get_accounts)
+  if [[ -z "$accounts" ]]; then
+    echo -e "${YELLOW}No accounts to sync.${RESET}"
+    return
+  fi
+
+  while IFS= read -r name; do
+    sync_shared "${PROFILES_DIR}/${name}"
+    echo -e "  ${GREEN}Synced:${RESET} ${name}"
+  done <<< "$accounts"
+  echo -e "\n  ${GREEN}All profiles updated with shared resources.${RESET}"
+}
+
+cmd_login() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage:${RESET} claude-select login <account-name>"
+    exit 1
+  fi
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Account '${name}' not found.${RESET}"
+    exit 1
+  fi
+
+  local profile_dir="${PROFILES_DIR}/${name}"
+  echo -e "  Re-authenticating ${CYAN}${name}${RESET}...\n"
+  CLAUDE_CONFIG_DIR="$profile_dir" claude login
+  echo -e "\n  ${GREEN}Done.${RESET}"
+}
+
+cmd_color() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage:${RESET} claude-select color <account-name>"
+    exit 1
+  fi
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Account '${name}' not found.${RESET}"
+    exit 1
+  fi
+
+  local current_color
+  current_color=$(get_account_color "$name")
+  if [[ -n "$current_color" ]]; then
+    local cur_rgb
+    cur_rgb=$(color_rgb "$current_color")
+    if [[ -n "$cur_rgb" ]]; then
+      local r g b
+      IFS=';' read -r r g b <<< "$cur_rgb"
+      echo -e "  Current color: $(printf '\033[38;2;%d;%d;%dm██ %s\033[0m' "$r" "$g" "$b" "$current_color")\n"
+    fi
+  fi
+
+  local color
+  color=$(prompt_color)
+  local tmp
+  tmp=$(jq --arg name "$name" --arg color "$color" '.accounts[$name].color = $color' "$CONFIG_FILE")
+  echo "$tmp" > "$CONFIG_FILE"
+
+  local rgb
+  rgb=$(color_rgb "$color")
+  local r g b
+  IFS=';' read -r r g b <<< "$rgb"
+  echo -e "\n  ${GREEN}Color for '${name}' set to$(printf ' \033[38;2;%d;%d;%dm%s\033[0m' "$r" "$g" "$b" "$color").${RESET}"
+}
+
+# --- Launch Claude with selected account ---
+launch_claude() {
+  local name="$1"
+  shift  # remaining args passed to claude
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Account '${name}' not found.${RESET}"
+    exit 1
+  fi
+
+  local profile_dir="${PROFILES_DIR}/${name}"
+
+  # Ensure shared resources are up to date
+  sync_shared "$profile_dir"
+
+  # Resolve the account color for the status line
+  local color
+  color=$(get_account_color "$name")
+  local color_rgb=""
+  if [[ -n "$color" ]]; then
+    color_rgb=$(color_rgb "$color")
+  fi
+
+  echo -e "${DIM}Launching Claude as ${CYAN}${name}${DIM}...${RESET}\n"
+
+  CLAUDE_CONFIG_DIR="$profile_dir" \
+  CLAUDE_ACCOUNT_NAME="$name" \
+  CLAUDE_ACCOUNT_COLOR="$color_rgb" \
+    claude "$@"
+}
+
+# --- Interactive picker ---
+cmd_pick() {
+  local accounts_arr=()
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && accounts_arr+=("$name")
+  done <<< "$(get_accounts)"
+
+  if [[ ${#accounts_arr[@]} -eq 0 ]]; then
+    echo -e "${YELLOW}No accounts configured.${RESET}"
+    echo -e "Add one with: ${CYAN}claude-select add <name>${RESET}"
+    exit 1
+  fi
+
+  # If only one account, just use it
+  if [[ ${#accounts_arr[@]} -eq 1 ]]; then
+    launch_claude "${accounts_arr[0]}" "$@"
+    return
+  fi
+
+  local default
+  default=$(get_default)
+
+  echo -e "${BOLD}Select a Claude account:${RESET}\n"
+  local i=1
+  for name in "${accounts_arr[@]}"; do
+    echo -e "  ${GREEN}${i})${RESET} $(get_account_label "$name")"
+    ((i++))
+  done
+  echo ""
+  read -rp "  Choose [1-${#accounts_arr[@]}] (enter for default): " choice
+
+  # Default selection
+  if [[ -z "$choice" ]]; then
+    if [[ -n "$default" ]]; then
+      launch_claude "$default" "$@"
+      return
+    else
+      echo -e "${RED}No default account set.${RESET} Pick a number."
+      exit 1
+    fi
+  fi
+
+  # Validate choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#accounts_arr[@]} )); then
+    echo -e "${RED}Invalid selection.${RESET}"
+    exit 1
+  fi
+
+  local selected="${accounts_arr[$((choice - 1))]}"
+  launch_claude "$selected" "$@"
+}
+
+# --- Main ---
+main() {
+  ensure_deps
+  ensure_setup
+
+  local cmd="${1:-}"
+
+  case "$cmd" in
+    add)
+      shift; cmd_add "$@" ;;
+    remove|rm)
+      shift; cmd_remove "$@" ;;
+    default)
+      shift; cmd_default "$@" ;;
+    list|ls)
+      cmd_list ;;
+    login)
+      shift; cmd_login "$@" ;;
+    color)
+      shift; cmd_color "$@" ;;
+    sync|setup-shared)
+      cmd_sync ;;
+    help|--help|-h)
+      echo -e "${BOLD}claude-select${RESET} — Multi-account launcher for Claude Code\n"
+      echo "Usage:"
+      echo "  claude-select              Interactive account picker"
+      echo "  claude-select <name>       Launch with a specific account"
+      echo "  claude-select add <name>   Add a new account (opens browser login)"
+      echo "  claude-select remove <name> Remove an account"
+      echo "  claude-select login <name>  Re-authenticate an account"
+      echo "  claude-select color <name>  Change an account's status line color"
+      echo "  claude-select list         List configured accounts"
+      echo "  claude-select default <name> Set default account"
+      echo "  claude-select sync         Re-sync shared symlinks"
+      echo ""
+      echo "All flags after the account name are passed through to claude."
+      echo "Example: claude-select work --model sonnet"
+      ;;
+    "")
+      cmd_pick ;;
+    *)
+      # If the argument matches an account name, launch it directly
+      if account_exists "$cmd"; then
+        shift; launch_claude "$cmd" "$@"
+      else
+        echo -e "${RED}Unknown command or account: '${cmd}'${RESET}"
+        echo -e "Run ${CYAN}claude-select help${RESET} for usage."
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+main "$@"
