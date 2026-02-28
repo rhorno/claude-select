@@ -10,7 +10,7 @@
 #   claude-select remove <name> Remove an account
 #   claude-select list         List configured accounts
 #   claude-select default <name> Set the default account
-#   claude-select color <name> Change an account's status line color
+#   claude-select color <name> Change an account's color (hex)
 #   claude-select sync         Re-sync shared resources (symlinks)
 #
 # How it works:
@@ -47,20 +47,15 @@ BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-# Color palette for account indicators (parallel arrays: name -> R;G;B)
-COLOR_NAMES=(blue green red purple orange cyan pink yellow)
-COLOR_RGBS=("97;175;239" "152;195;121" "224;108;117" "198;120;221" "209;154;102" "86;182;194" "255;121;198" "229;192;123")
+# Convert hex color (#RRGGBB or RRGGBB) to semicolon-separated R;G;B
+hex_to_rgb() {
+  local hex="${1#\#}"
+  printf "%d;%d;%d" "0x${hex:0:2}" "0x${hex:2:2}" "0x${hex:4:2}"
+}
 
-# Look up RGB for a color name; prints empty string if not found
-color_rgb() {
-  local target="$1"
-  local i
-  for i in "${!COLOR_NAMES[@]}"; do
-    if [[ "${COLOR_NAMES[$i]}" == "$target" ]]; then
-      echo "${COLOR_RGBS[$i]}"
-      return
-    fi
-  done
+# Validate a hex color string
+is_valid_hex() {
+  [[ "$1" =~ ^#?[0-9A-Fa-f]{6}$ ]]
 }
 
 # --- Helpers ---
@@ -100,10 +95,9 @@ get_account_label() {
   local color
   color=$(get_account_color "$name")
   local swatch=""
-  local rgb
-  rgb=$(color_rgb "$color")
-  if [[ -n "$rgb" ]]; then
-    local r g b
+  if [[ -n "$color" ]] && is_valid_hex "$color"; then
+    local rgb r g b
+    rgb=$(hex_to_rgb "$color")
     IFS=';' read -r r g b <<< "$rgb"
     swatch="$(printf '\033[38;2;%d;%d;%dm██\033[0m ' "$r" "$g" "$b")"
   fi
@@ -121,34 +115,18 @@ get_account_color() {
   jq -r ".accounts[\"$name\"].color // \"\"" "$CONFIG_FILE"
 }
 
-show_color_palette() {
-  echo -e "  ${BOLD}Pick a color:${RESET}\n"
-  local i=1
-  for idx in "${!COLOR_NAMES[@]}"; do
-    local color_name="${COLOR_NAMES[$idx]}"
-    local rgb="${COLOR_RGBS[$idx]}"
-    local r g b
-    IFS=';' read -r r g b <<< "$rgb"
-    local swatch
-    swatch="$(printf '\033[38;2;%d;%d;%dm██\033[0m' "$r" "$g" "$b")"
-    echo -e "  ${GREEN}${i})${RESET} ${swatch} ${color_name}"
-    ((i++))
-  done
-  echo ""
-}
-
 prompt_color() {
-  show_color_palette
-  local choice
-  read -rp "  Choose [1-${#COLOR_NAMES[@]}]: " choice
+  local hex
+  read -rp "  Hex color (e.g. #61afef): " hex
 
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#COLOR_NAMES[@]} )); then
-    echo -e "  ${YELLOW}Invalid choice, defaulting to blue.${RESET}"
-    echo "blue"
+  if ! is_valid_hex "$hex"; then
+    echo -e "  ${YELLOW}Invalid hex color, defaulting to #61afef.${RESET}" >&2
+    echo "#61afef"
     return
   fi
 
-  echo "${COLOR_NAMES[$((choice - 1))]}"
+  # Normalize to #RRGGBB
+  echo "#${hex#\#}"
 }
 
 # --- Symlink shared resources ---
@@ -200,11 +178,10 @@ cmd_add() {
   # Pick a color for this account
   local color
   color=$(prompt_color)
-  local rgb
-  rgb=$(color_rgb "$color")
-  local r g b
+  local rgb r g b
+  rgb=$(hex_to_rgb "$color")
   IFS=';' read -r r g b <<< "$rgb"
-  echo -e "\n  Using $(printf '\033[38;2;%d;%d;%dm%s\033[0m' "$r" "$g" "$b" "$color") for ${CYAN}${name}${RESET}\n"
+  echo -e "\n  Using $(printf '\033[38;2;%d;%d;%dm██ %s\033[0m' "$r" "$g" "$b" "$color") for ${CYAN}${name}${RESET}\n"
 
   # Create profile directory and sync shared resources
   local profile_dir="${PROFILES_DIR}/${name}"
@@ -355,14 +332,11 @@ cmd_color() {
 
   local current_color
   current_color=$(get_account_color "$name")
-  if [[ -n "$current_color" ]]; then
-    local cur_rgb
-    cur_rgb=$(color_rgb "$current_color")
-    if [[ -n "$cur_rgb" ]]; then
-      local r g b
-      IFS=';' read -r r g b <<< "$cur_rgb"
-      echo -e "  Current color: $(printf '\033[38;2;%d;%d;%dm██ %s\033[0m' "$r" "$g" "$b" "$current_color")\n"
-    fi
+  if [[ -n "$current_color" ]] && is_valid_hex "$current_color"; then
+    local cur_rgb r g b
+    cur_rgb=$(hex_to_rgb "$current_color")
+    IFS=';' read -r r g b <<< "$cur_rgb"
+    echo -e "  Current color: $(printf '\033[38;2;%d;%d;%dm██ %s\033[0m' "$r" "$g" "$b" "$current_color")\n"
   fi
 
   local color
@@ -371,11 +345,10 @@ cmd_color() {
   tmp=$(jq --arg name "$name" --arg color "$color" '.accounts[$name].color = $color' "$CONFIG_FILE")
   echo "$tmp" > "$CONFIG_FILE"
 
-  local rgb
-  rgb=$(color_rgb "$color")
-  local r g b
+  local rgb r g b
+  rgb=$(hex_to_rgb "$color")
   IFS=';' read -r r g b <<< "$rgb"
-  echo -e "\n  ${GREEN}Color for '${name}' set to$(printf ' \033[38;2;%d;%d;%dm%s\033[0m' "$r" "$g" "$b" "$color").${RESET}"
+  echo -e "\n  ${GREEN}Color for '${name}' set to$(printf ' \033[38;2;%d;%d;%dm██ %s\033[0m' "$r" "$g" "$b" "$color").${RESET}"
 }
 
 # --- Launch Claude with selected account ---
@@ -397,8 +370,8 @@ launch_claude() {
   local color
   color=$(get_account_color "$name")
   local color_rgb=""
-  if [[ -n "$color" ]]; then
-    color_rgb=$(color_rgb "$color")
+  if [[ -n "$color" ]] && is_valid_hex "$color"; then
+    color_rgb=$(hex_to_rgb "$color")
   fi
 
   echo -e "${DIM}Launching Claude as ${CYAN}${name}${DIM}...${RESET}\n"
@@ -491,7 +464,7 @@ main() {
       echo "  claude-select add <name>   Add a new account (opens browser login)"
       echo "  claude-select remove <name> Remove an account"
       echo "  claude-select login <name>  Re-authenticate an account"
-      echo "  claude-select color <name>  Change an account's status line color"
+      echo "  claude-select color <name>  Change an account's color (hex)"
       echo "  claude-select list         List configured accounts"
       echo "  claude-select default <name> Set default account"
       echo "  claude-select sync         Re-sync shared symlinks"
