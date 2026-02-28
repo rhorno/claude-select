@@ -112,6 +112,7 @@ Auth lives in the macOS Keychain, namespaced per profile. Shared resources are s
 | `claude-select remove <name>` | Remove an account |
 | `claude-select login <name>` | Re-authenticate an existing account |
 | `claude-select color <name>` | Change an account's status line color |
+| `claude-select rename <old> <new>` | Rename an account |
 | `claude-select list` | List all accounts (with color swatches) |
 | `claude-select default <name>` | Set default account |
 | `claude-select sync` | Re-sync shared symlinks |

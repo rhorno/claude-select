@@ -11,6 +11,7 @@
 #   claude-select list         List configured accounts
 #   claude-select default <name> Set the default account
 #   claude-select color <name> Change an account's color (hex)
+#   claude-select rename <old> <new> Rename an account
 #   claude-select sync         Re-sync shared resources (symlinks)
 #
 # How it works:
@@ -351,6 +352,50 @@ cmd_color() {
   echo -e "\n  ${GREEN}Color for '${name}' set to$(printf ' \033[38;2;%d;%d;%dm██ %s\033[0m' "$r" "$g" "$b" "$color").${RESET}"
 }
 
+cmd_rename() {
+  local old_name="${1:-}"
+  local new_name="${2:-}"
+
+  if [[ -z "$old_name" || -z "$new_name" ]]; then
+    echo -e "${RED}Usage:${RESET} claude-select rename <old-name> <new-name>"
+    exit 1
+  fi
+
+  if ! account_exists "$old_name"; then
+    echo -e "${RED}Account '${old_name}' not found.${RESET}"
+    exit 1
+  fi
+
+  if account_exists "$new_name"; then
+    echo -e "${RED}Account '${new_name}' already exists.${RESET}"
+    exit 1
+  fi
+
+  # Rename profile directory
+  local old_dir="${PROFILES_DIR}/${old_name}"
+  local new_dir="${PROFILES_DIR}/${new_name}"
+  if [[ -d "$old_dir" ]]; then
+    mv "$old_dir" "$new_dir"
+  fi
+
+  # Rename account key in config
+  local tmp
+  tmp=$(jq --arg old "$old_name" --arg new "$new_name" \
+    '.accounts[$new] = .accounts[$old] | del(.accounts[$old])' \
+    "$CONFIG_FILE")
+  echo "$tmp" > "$CONFIG_FILE"
+
+  # Update default if needed
+  local default
+  default=$(get_default)
+  if [[ "$default" == "$old_name" ]]; then
+    tmp=$(jq --arg name "$new_name" '.default = $name' "$CONFIG_FILE")
+    echo "$tmp" > "$CONFIG_FILE"
+  fi
+
+  echo -e "  ${GREEN}Account '${old_name}' renamed to '${new_name}'.${RESET}"
+}
+
 # --- Launch Claude with selected account ---
 launch_claude() {
   local name="$1"
@@ -454,6 +499,8 @@ main() {
       shift; cmd_login "$@" ;;
     color)
       shift; cmd_color "$@" ;;
+    rename)
+      shift; cmd_rename "$@" ;;
     sync|setup-shared)
       cmd_sync ;;
     help|--help|-h)
@@ -465,6 +512,7 @@ main() {
       echo "  claude-select remove <name> Remove an account"
       echo "  claude-select login <name>  Re-authenticate an account"
       echo "  claude-select color <name>  Change an account's color (hex)"
+      echo "  claude-select rename <old> <new> Rename an account"
       echo "  claude-select list         List configured accounts"
       echo "  claude-select default <name> Set default account"
       echo "  claude-select sync         Re-sync shared symlinks"
