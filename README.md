@@ -82,7 +82,8 @@ Your settings should already live in `~/.claude/` — that's what gets symlinked
 ~/.claude/                       ← Your main settings (source of truth)
 ├── settings.json
 ├── CLAUDE.md
-└── agents/
+├── agents/
+└── skills/
 
 ~/.claude-accounts/
 ├── config.json                  ← Account registry, default, colors
@@ -129,14 +130,9 @@ The color is passed to your [status line script](https://docs.anthropic.com/en/d
 
 ## Customizing shared resources
 
-By default, these are symlinked from `~/.claude/`:
+Everything in `~/.claude/` is automatically symlinked into each profile, except per-account directories that should remain separate: `cache`, `debug`, `backups`, `todos`, and `ide`. This means new resource types (like `skills/`, `commands/`, etc.) are shared automatically without needing to update the script.
 
-- `settings.json`, `settings.local.json`
-- `CLAUDE.md`
-- `agents/`
-- `statsig/`
-
-Edit the `SHARED_RESOURCES` array near the top of the script to add or remove items.
+To change what's excluded, edit the `ACCOUNT_LOCAL` array near the top of the script.
 
 ## If auth expires
 

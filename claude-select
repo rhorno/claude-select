@@ -15,9 +15,9 @@
 #
 # How it works:
 #   Each account gets its own CLAUDE_CONFIG_DIR (~/.claude-accounts/profiles/<name>/).
-#   Shared resources (settings.json, agents/, CLAUDE.md, etc.) are symlinked from
-#   your main ~/.claude/ directory into each profile, so you maintain one set of
-#   settings. Auth is handled by the macOS Keychain — each CLAUDE_CONFIG_DIR gets
+#   Everything in ~/.claude/ is symlinked into each profile (except per-account
+#   directories like cache, debug, etc.), so you maintain one set of settings.
+#   Auth is handled by the macOS Keychain — each CLAUDE_CONFIG_DIR gets
 #   its own namespaced Keychain entry, so concurrent sessions just work.
 
 set -euo pipefail
@@ -28,14 +28,14 @@ PROFILES_DIR="${ACCOUNTS_DIR}/profiles"
 CONFIG_FILE="${ACCOUNTS_DIR}/config.json"
 CLAUDE_HOME="${HOME}/.claude"
 
-# Shared resources to symlink from ~/.claude into each profile.
-# Edit this list to control what's shared vs per-account.
-SHARED_RESOURCES=(
-  "settings.json"
-  "settings.local.json"
-  "CLAUDE.md"
-  "agents"
-  "statsig"
+# Per-account resources that should NOT be symlinked from ~/.claude.
+# Everything else in ~/.claude/ is shared across all accounts.
+ACCOUNT_LOCAL=(
+  "cache"
+  "debug"
+  "backups"
+  "todos"
+  "ide"
 )
 
 # --- Colors ---
@@ -156,19 +156,28 @@ sync_shared() {
   local profile_dir="$1"
   mkdir -p "$profile_dir"
 
-  for resource in "${SHARED_RESOURCES[@]}"; do
-    local src="${CLAUDE_HOME}/${resource}"
-    local dst="${profile_dir}/${resource}"
+  for src in "${CLAUDE_HOME}"/*; do
+    local name
+    name=$(basename "$src")
+
+    # Skip per-account resources
+    local skip=false
+    for excluded in "${ACCOUNT_LOCAL[@]}"; do
+      if [[ "$name" == "$excluded" ]]; then
+        skip=true
+        break
+      fi
+    done
+    $skip && continue
+
+    local dst="${profile_dir}/${name}"
 
     # Remove existing symlink (don't touch real files/dirs)
     if [[ -L "$dst" ]]; then
       rm "$dst"
     fi
 
-    # Only symlink if the source exists
-    if [[ -e "$src" ]]; then
-      ln -sf "$src" "$dst"
-    fi
+    ln -sf "$src" "$dst"
   done
 }
 
