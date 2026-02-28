@@ -111,6 +111,13 @@ account_exists() {
   jq -e ".accounts[\"$name\"]" "$CONFIG_FILE" &>/dev/null
 }
 
+get_profile_dir() {
+  local name="$1"
+  local dir
+  dir=$(jq -r ".accounts[\"$name\"].dir // \"$name\"" "$CONFIG_FILE")
+  echo "${PROFILES_DIR}/${dir}"
+}
+
 get_account_color() {
   local name="$1"
   jq -r ".accounts[\"$name\"].color // \"\"" "$CONFIG_FILE"
@@ -226,7 +233,7 @@ cmd_remove() {
   fi
 
   # Remove profile directory (symlinks + claude-generated files)
-  rm -rf "${PROFILES_DIR}/${name}"
+  rm -rf "$(get_profile_dir "$name")"
 
   # Update config
   local tmp
@@ -295,7 +302,7 @@ cmd_sync() {
   fi
 
   while IFS= read -r name; do
-    sync_shared "${PROFILES_DIR}/${name}"
+    sync_shared "$(get_profile_dir "$name")"
     echo -e "  ${GREEN}Synced:${RESET} ${name}"
   done <<< "$accounts"
   echo -e "\n  ${GREEN}All profiles updated with shared resources.${RESET}"
@@ -313,7 +320,8 @@ cmd_login() {
     exit 1
   fi
 
-  local profile_dir="${PROFILES_DIR}/${name}"
+  local profile_dir
+  profile_dir=$(get_profile_dir "$name")
   echo -e "  Re-authenticating ${CYAN}${name}${RESET}...\n"
   CLAUDE_CONFIG_DIR="$profile_dir" claude login
   echo -e "\n  ${GREEN}Done.${RESET}"
@@ -371,17 +379,14 @@ cmd_rename() {
     exit 1
   fi
 
-  # Rename profile directory
-  local old_dir="${PROFILES_DIR}/${old_name}"
-  local new_dir="${PROFILES_DIR}/${new_name}"
-  if [[ -d "$old_dir" ]]; then
-    mv "$old_dir" "$new_dir"
-  fi
+  # Get the actual profile directory name (preserves auth/keychain association)
+  local actual_dir
+  actual_dir=$(jq -r ".accounts[\"$old_name\"].dir // \"$old_name\"" "$CONFIG_FILE")
 
-  # Rename account key in config
+  # Rename account key in config, keeping the original directory reference
   local tmp
-  tmp=$(jq --arg old "$old_name" --arg new "$new_name" \
-    '.accounts[$new] = .accounts[$old] | del(.accounts[$old])' \
+  tmp=$(jq --arg old "$old_name" --arg new "$new_name" --arg dir "$actual_dir" \
+    '.accounts[$new] = .accounts[$old] | .accounts[$new].dir = $dir | del(.accounts[$old])' \
     "$CONFIG_FILE")
   echo "$tmp" > "$CONFIG_FILE"
 
@@ -406,7 +411,8 @@ launch_claude() {
     exit 1
   fi
 
-  local profile_dir="${PROFILES_DIR}/${name}"
+  local profile_dir
+  profile_dir=$(get_profile_dir "$name")
 
   # Ensure shared resources are up to date
   sync_shared "$profile_dir"
