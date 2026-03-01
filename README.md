@@ -97,7 +97,7 @@ Shared resources are symlinked. Account-specific data (projects, history, todos)
 | `claude-select add <name>` | Add account (opens browser login) |
 | `claude-select remove <name>` | Remove an account |
 | `claude-select login <name>` | Re-authenticate an existing account |
-| `claude-select color <name>` | Change an account's status line color |
+| `claude-select color <name>` | Change an account's color |
 | `claude-select rename <old> <new>` | Rename an account |
 | `claude-select list` | List all accounts (with color swatches) |
 | `claude-select default <name>` | Set default account |
@@ -125,4 +125,3 @@ You can use these in a [custom status line](https://docs.anthropic.com/en/docs/c
   "statusLine": "printf '%s' \"$CLAUDE_ACCOUNT_NAME\""
 }
 ```
-
