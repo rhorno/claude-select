@@ -1,16 +1,17 @@
 # claude-select
 
-Minimal CLI wrapper for running Claude Code with multiple accounts. Run concurrent sessions in different terminal tabs — each with its own account — while sharing settings, skills, agents, and CLAUDE.md.
+Minimal CLI wrapper for running Claude Code with multiple accounts. Each shell session gets its own account while sharing settings, skills, agents, and CLAUDE.md.
 
-## The problem
+## Why
 
-Using separate `CLAUDE_CONFIG_DIR` directories (e.g. `~/.claude-work`, `~/.claude-personal`) duplicates all your settings, skills, agents, and CLAUDE.md. You end up maintaining multiple copies of everything just to separate accounts.
+Using separate `CLAUDE_CONFIG_DIR` directories duplicates all your settings, skills, agents, and CLAUDE.md. claude-select gives each account its own profile directory while symlinking shared resources from `~/.claude/` — one set of settings to maintain.
 
-## How this solves it
+### Authentication
 
-- Each account gets its own `CLAUDE_CONFIG_DIR` profile directory
-- Auth is handled by the macOS Keychain (each profile gets its own namespaced Keychain entry — concurrent sessions just work)
-- Shared resources (settings.json, agents, CLAUDE.md, etc.) are symlinked from `~/.claude/` into each profile — one set of settings to maintain
+Each profile gets its own `CLAUDE_CONFIG_DIR`, so `claude login` stores separate credentials per account. Concurrent sessions just work.
+
+- **macOS** — credentials are stored in the Keychain, namespaced by profile directory
+- **Linux / WSL** — credentials are stored in the profile directory itself (file-based)
 
 ## Install
 
@@ -19,13 +20,14 @@ Using separate `CLAUDE_CONFIG_DIR` directories (e.g. `~/.claude-work`, `~/.claud
 cp claude-select /usr/local/bin/
 chmod +x /usr/local/bin/claude-select
 
-# Requires jq
-brew install jq
+# Requires jq for reading and writing the account config (JSON)
+# macOS: brew install jq
+# Linux: sudo apt install jq (or your package manager)
 ```
 
 ### Optional: make bare `claude` use your default account
 
-Add this to your `~/.zshrc`:
+Add this to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
 ```bash
 claude() {
@@ -44,7 +46,7 @@ claude() {
 ## Quick start
 
 ```bash
-# 1. Add your accounts (each opens a browser login + color picker)
+# 1. Add your accounts (each opens browser login + color picker)
 claude-select add work        # sign in with your work account, pick a color
 claude-select add personal    # sign in with your personal account, pick a color
 
@@ -59,22 +61,6 @@ claude-select personal     # launch directly
 # Extra flags pass through to claude:
 claude-select work --model sonnet
 ```
-
-## Migrating from separate config dirs
-
-If you already have `~/.claude-work` and `~/.claude-personal`:
-
-```bash
-# 1. Add accounts (this creates new profiles and triggers login)
-claude-select add work
-claude-select add personal
-claude-select default work
-
-# 2. Your old ~/.claude-work and ~/.claude-personal dirs can be removed
-#    once you've verified everything works.
-```
-
-Your settings should already live in `~/.claude/` — that's what gets symlinked into each profile.
 
 ## How it works
 
@@ -100,7 +86,7 @@ Your settings should already live in `~/.claude/` — that's what gets symlinked
         └── projects/            ← Per-account
 ```
 
-Auth lives in the macOS Keychain, namespaced per profile. Shared resources are symlinked. Account-specific data (projects, history, todos) stays in each profile directory.
+Shared resources are symlinked. Account-specific data (projects, history, todos) stays in each profile directory.
 
 ## Commands
 
@@ -117,28 +103,26 @@ Auth lives in the macOS Keychain, namespaced per profile. Shared resources are s
 | `claude-select default <name>` | Set default account |
 | `claude-select sync` | Re-sync shared symlinks |
 
-## Account colors
+## Account colors and names
 
-Each account gets a color that shows in the Claude Code status line, so you can instantly tell which account you're using. You pick a color when adding an account, and can change it anytime:
+Each account gets a hex color you pick when adding an account. Change it anytime:
 
 ```bash
 claude-select color work
 ```
 
-Available colors: blue, green, red, purple, orange, cyan, pink, yellow.
+When launching Claude, these environment variables are set:
 
-The color is passed to your [status line script](https://docs.anthropic.com/en/docs/claude-code/status-line) via `CLAUDE_ACCOUNT_NAME` and `CLAUDE_ACCOUNT_COLOR` environment variables. If you use a custom status line, you can read these to display the account indicator however you like.
+| Variable | Format | Example |
+|---|---|---|
+| `CLAUDE_ACCOUNT_NAME` | Account name string | `work` |
+| `CLAUDE_ACCOUNT_COLOR` | Semicolon-separated RGB | `97;175;239` |
 
-## Customizing shared resources
+You can use these in a [custom status line](https://docs.anthropic.com/en/docs/claude-code/status-line) to display which account is active. For example, in your `~/.claude/settings.json`:
 
-Everything in `~/.claude/` is automatically symlinked into each profile, except per-account directories that should remain separate: `cache`, `debug`, `backups`, `todos`, and `ide`. This means new resource types (like `skills/`, `commands/`, etc.) are shared automatically without needing to update the script.
-
-To change what's excluded, edit the `ACCOUNT_LOCAL` array near the top of the script.
-
-## If auth expires
-
-If you get authentication errors after not using an account for a while, just re-login:
-
-```bash
-claude-select login work
+```json
+{
+  "statusLine": "printf '%s' \"$CLAUDE_ACCOUNT_NAME\""
+}
 ```
+
